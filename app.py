@@ -1,14 +1,12 @@
 import os
-import re
-from collections import Counter
-
 import numpy as np
 import pandas as pd
 import streamlit as st
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 st.set_page_config(
     page_title="Amazon Product Recommender",
-    page_icon=":shopping_cart:",
     layout="wide",
 )
 
@@ -39,10 +37,6 @@ st.markdown("""
 
 @st.cache_data(show_spinner="Loading dataset…")
 def load_data():
-    """
-    Loads pre-cleaned amazon_clean.csv (produced by the EDA notebook).
-    Falls back to raw amazon.csv with on-the-fly cleaning if the clean file is absent.
-    """
     if os.path.exists("amazon_clean.csv"):
         df = pd.read_csv("amazon_clean.csv")
     else:
@@ -79,51 +73,32 @@ def load_data():
 
 # TF-IDF RECOMMENDATION ENGINE 
 
-@st.cache_data(show_spinner="Building recommendation engine…")
+@st.cache_resource(show_spinner="Building recommendation engine…")
 def build_tfidf_matrix(df):
     """
-    TF-IDF vectors from product name (x3), category (x2), and description.
-    Rows are L2-normalised so dot-product == cosine similarity.
+    TF-IDF vectors using scikit-learn.
+    We simulate weighting by repeating the text (Name x3, Category x2).
     """
-    def tokenize(text):
-        return re.findall(r"[a-z0-9]+", str(text).lower())
-
-    corpus = [
-        tokenize(r["product_name"]) * 3
-        + tokenize(r["main_category"]) * 2
-        + tokenize(str(r.get("about_product", "")))
-        for _, r in df.iterrows()
-    ]
-
-    all_terms = sorted({t for doc in corpus for t in doc})
-    term_idx  = {t: i for i, t in enumerate(all_terms)}
-    n_docs, n_terms = len(corpus), len(all_terms)
-
-    tf = np.zeros((n_docs, n_terms), dtype=np.float32)
-    for d, tokens in enumerate(corpus):
-        cnt   = Counter(tokens)
-        total = sum(cnt.values())
-        for t, c in cnt.items():
-            if t in term_idx:
-                tf[d, term_idx[t]] = c / total
-
-    df_count = (tf > 0).sum(axis=0).astype(np.float32)
-    idf      = np.log((n_docs + 1) / (df_count + 1)) + 1.0
-    tfidf    = tf * idf
-
-    norms = np.linalg.norm(tfidf, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0
-    return tfidf / norms
-
+    corpus = (
+        (df["product_name"].fillna("") + " ") * 3 +
+        (df["main_category"].fillna("") + " ") * 2 +
+        df["about_product"].fillna("")
+    )
+    
+    vectorizer = TfidfVectorizer(
+        lowercase=True, 
+        token_pattern=r"(?u)\b[a-zA-Z0-9]+\b"
+    )
+    tfidf_matrix = vectorizer.fit_transform(corpus)    
+    return tfidf_matrix
 
 def content_based_recommend(df, tfidf, product_idx, top_n=10):
-    sims = tfidf @ tfidf[product_idx]
-    sims[product_idx] = -1
-    top_idx = np.argsort(sims)[::-1][:top_n]
-    result  = df.iloc[top_idx].copy()
-    result["similarity"] = sims[top_idx]
+    sims = cosine_similarity(tfidf[product_idx], tfidf).flatten()    
+    sims[product_idx] = -1    
+    top_idx = np.argsort(sims)[::-1][:top_n]    
+    result = df.iloc[top_idx].copy()
+    result["similarity"] = sims[top_idx]    
     return result
-
 
 def category_top_products(df, category, sort_by="value_score", top_n=10):
     return df[df["main_category"] == category].nlargest(top_n, sort_by)
